@@ -29,7 +29,9 @@ var CONFIG = {
     // If STANDALONE, put the spreadsheet id here (or in Script Property SPREADSHEET_ID).
     spreadsheetId: '',                                                         // CONFIRM (bound = blank)
     livePrefix: 'Sales Register_',   // live tabs are `${livePrefix}FY25-26`, etc.  // CONFIRM
-    stagingTab: 'Sales Register_Staging',
+    // When a new fiscal year starts and its tab doesn't exist yet, auto-create it by cloning
+    // the header row of the newest existing live tab (so the sync never fails at FY roll-over).
+    autoCreateFyTab: true,
     // Product Master tabs used to look up cost price (CP). Header matched by name below.
     productMasterGT: 'Product Master_GT',                                       // CONFIRM
     productMasterMT: 'Product Master_MT',                                       // CONFIRM
@@ -114,7 +116,14 @@ var CONFIG = {
     { field: 'source',      header: '_Source',        aliases: [],                            owner: 'sync', type: 'text' }
   ],
 
-  // Value written into the Verified column when a row is (re)staged and awaiting admin sign-off.
+  // ---- Manual "specified fields" (the core of the weekly-review model) ---
+  // The sync writes NEW rows straight into the live FY tabs each run (no per-run gate). On rows
+  // that ALREADY EXIST it never overwrites a NON-EMPTY value in these fields — so any tag/edit an
+  // admin makes here survives every future sync. (A still-blank field may be filled by the
+  // auto-resolver; a human value is sacred.) Add any column you hand-maintain to this list.
+  preserveOnUpdate: ['channel', 'verified', 'adminNotes'],                     // CONFIRM (add fields you edit by hand)
+
+  // Value the sync seeds into the Verified column for brand-new rows (admin flips to Yes weekly).
   verifiedNo: 'No',
   verifiedYes: 'Yes'
 };

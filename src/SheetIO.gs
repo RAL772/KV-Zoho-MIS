@@ -1,10 +1,13 @@
 /**
- * SheetIO.gs — all Google Sheet reads/writes.
+ * SheetIO.gs — all Google Sheet reads/writes (direct-to-live model).
  *
- * Design guarantees:
+ * Guarantees:
  *  - Writes are values-only (setValues) → tab names & gids the dashboard depends on never change.
- *  - Admin-owned columns (owner:'admin') are NEVER overwritten on rows that already exist.
- *  - Live tabs are matched by header NAME (any column order); staging is created in canonical order.
+ *  - The sync writes NEW rows straight into their live FY tab each run (no per-run gate).
+ *  - "Specified fields" (CONFIG.preserveOnUpdate): on an EXISTING row the sync never overwrites a
+ *    NON-EMPTY value there, so manual admin edits (GT/MT channel, Verified, notes) survive forever.
+ *    A still-blank specified field may be filled by the auto-resolver; a human value is never touched.
+ *  - Live tabs are matched by header NAME (any column order); a _Key column is required for upsert.
  */
 
 function getSpreadsheet_() {
@@ -28,149 +31,124 @@ function columnMapForSheet_(sheet) {
   return { header: header, map: map };
 }
 
-/** Create the staging tab with the full canonical header row if it doesn't exist. */
-function ensureStagingSheet_() {
-  var ss = getSpreadsheet_();
-  var sh = ss.getSheetByName(CONFIG.sheet.stagingTab);
-  if (!sh) {
-    sh = ss.insertSheet(CONFIG.sheet.stagingTab);
-    var headers = CONFIG.columns.map(function (c) { return c.header; });
-    sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-    sh.setFrozenRows(1);
-  }
-  return sh;
+/** The fields the sync must not overwrite once a human has set them (see CONFIG.preserveOnUpdate). */
+function preserveFields_() {
+  if (CONFIG.preserveOnUpdate && CONFIG.preserveOnUpdate.length) return CONFIG.preserveOnUpdate;
+  return CONFIG.columns.filter(function (c) { return c.owner === 'admin'; }).map(function (c) { return c.field; });
 }
 
 /**
- * Upsert canonical row objects into the STAGING tab, keyed by `_Key`.
- * Carry-forward: if a key already exists on a live FY tab, seed the staging row's admin columns
- * (channel / notes) from the live row so the admin isn't re-tagging from scratch.
+ * Upsert canonical rows directly into their live FY tabs (routed by invoice/credit-note date).
+ * Returns { inserted, updated, tabs:{ tab:{inserted,updated} } }.
  */
-function writeRowsToStaging_(rows) {
-  if (!rows.length) return { inserted: 0, updated: 0 };
-  var sh = ensureStagingSheet_();
+function writeRowsToLive_(rows) {
+  var byTab = {};
+  rows.forEach(function (row) {
+    var d = (row._date instanceof Date) ? row._date : parseIsoDate_(row.date);
+    if (!d) return;
+    var tab = liveTabForDate_(d);
+    (byTab[tab] = byTab[tab] || []).push(row);
+  });
+
+  var summary = { inserted: 0, updated: 0, tabs: {} };
+  Object.keys(byTab).forEach(function (tab) {
+    var r = upsertLive_(tab, byTab[tab]);
+    summary.inserted += r.inserted;
+    summary.updated += r.updated;
+    summary.tabs[tab] = r;
+  });
+  return summary;
+}
+
+/** Upsert rows into ONE live FY tab. Preserves non-empty specified fields on existing rows. */
+function upsertLive_(tabName, rows) {
+  var sh = ensureFyTab_(tabName);
   var cm = columnMapForSheet_(sh);
-  var keyCol = cm.map.key;
-  if (!keyCol) throw new Error('Staging tab is missing the _Key column.');
-
-  var liveTags = buildLiveTagIndex_();                 // key → { channel, adminNotes }
-  var existing = readKeyRowIndex_(sh, keyCol);         // key → sheet row number
+  if (!cm.map.key) throw new Error('Live tab "' + tabName + '" has no _Key column; add it so the sync can upsert without duplicating rows.');
   var lastCol = sh.getLastColumn();
-
+  var existing = readKeyRowIndex_(sh, cm.map.key);
   var appends = [];
   var updated = 0;
 
   rows.forEach(function (row) {
-    // seed admin columns from an already-promoted live row, if present
-    var carried = liveTags[row.key];
-    if (carried) {
-      if (carried.channel) row.channel = carried.channel;
-      if (carried.adminNotes) row.adminNotes = carried.adminNotes;
-    }
     var rowNum = existing[row.key];
     if (rowNum) {
-      // update SYNC-owned cells only; leave admin cells (channel/verified/notes) as the admin left them
       var current = sh.getRange(rowNum, 1, 1, lastCol).getValues()[0];
-      var merged = buildRowArray_(cm, row, current, /*preserveAdmin=*/true);
+      var merged = buildRowArray_(cm, row, current);   // preserves non-empty specified fields
       sh.getRange(rowNum, 1, 1, lastCol).setValues([merged]);
       updated++;
     } else {
-      appends.push(buildRowArray_(cm, row, null, /*preserveAdmin=*/false));
-    }
-  });
-
-  if (appends.length) {
-    sh.getRange(sh.getLastRow() + 1, 1, appends.length, lastCol).setValues(appends);
-  }
-  return { inserted: appends.length, updated: updated };
-}
-
-/**
- * Promote all rows on staging whose Verified === Yes into their live FY tab, then remove them
- * from staging. Upsert on live is tag-preserving. Returns a summary.
- */
-function promoteVerifiedRows_() {
-  var ss = getSpreadsheet_();
-  var sh = ss.getSheetByName(CONFIG.sheet.stagingTab);
-  if (!sh || sh.getLastRow() < 2) return { promoted: 0, tabs: {} };
-
-  var cm = columnMapForSheet_(sh);
-  var lastCol = sh.getLastColumn();
-  var values = sh.getRange(2, 1, sh.getLastRow() - 1, lastCol).getValues();
-
-  var verCol = cm.map.verified, keyCol = cm.map.key, dateCol = cm.map.date;
-  if (!verCol || !keyCol || !dateCol) throw new Error('Staging tab missing Verified / _Key / Date column.');
-
-  var promoteRowNums = [];
-  var byTab = {};   // tabName → array of canonical row objects
-  var summary = { promoted: 0, tabs: {} };
-
-  for (var i = 0; i < values.length; i++) {
-    var v = values[i];
-    var ver = String(v[verCol - 1]).trim().toLowerCase();
-    if (ver !== CONFIG.verifiedYes.toLowerCase() && ver !== 'yes' && ver !== 'y' && ver !== 'true') continue;
-
-    var obj = arrayToRowObject_(cm, v);
-    var d = (obj.date instanceof Date) ? obj.date : (parseIsoDate_(obj.date) || safeDate_(obj.date));
-    if (!d || isNaN(d.getTime())) continue;
-    var tab = liveTabForDate_(d);
-    (byTab[tab] = byTab[tab] || []).push(obj);
-    promoteRowNums.push(i + 2); // sheet row number
-  }
-
-  Object.keys(byTab).forEach(function (tab) {
-    var n = upsertLive_(tab, byTab[tab]);
-    summary.tabs[tab] = n;
-    summary.promoted += n;
-  });
-
-  // delete promoted rows from staging (bottom-up to keep indices valid)
-  promoteRowNums.sort(function (a, b) { return b - a; });
-  promoteRowNums.forEach(function (rn) { sh.deleteRow(rn); });
-
-  return summary;
-}
-
-/** Upsert canonical row objects into a live FY tab (must already exist). Tag columns preserved. */
-function upsertLive_(tabName, rows) {
-  var ss = getSpreadsheet_();
-  var sh = ss.getSheetByName(tabName);
-  if (!sh) {
-    throw new Error('Live tab "' + tabName + '" does not exist. Create it (additively, exact name) before promoting rows for that FY.');
-  }
-  var cm = columnMapForSheet_(sh);
-  if (!cm.map.key) throw new Error('Live tab "' + tabName + '" has no _Key column; add it so promotion can upsert without duplicates.');
-  var lastCol = sh.getLastColumn();
-  var existing = readKeyRowIndex_(sh, cm.map.key);
-  var appends = [];
-
-  rows.forEach(function (row) {
-    var rowNum = existing[row.key];
-    if (rowNum) {
-      var current = sh.getRange(rowNum, 1, 1, lastCol).getValues()[0];
-      // on live, the admin columns ARE authoritative (they were verified) → write them through,
-      // but keep any existing admin note the admin may have added directly on the live tab.
-      var merged = buildRowArray_(cm, row, current, /*preserveAdmin=*/false);
-      sh.getRange(rowNum, 1, 1, lastCol).setValues([merged]);
-    } else {
-      appends.push(buildRowArray_(cm, row, null, false));
+      appends.push(buildRowArray_(cm, row, null));      // new row: seed channel + Verified=No
     }
   });
   if (appends.length) sh.getRange(sh.getLastRow() + 1, 1, appends.length, lastCol).setValues(appends);
-  return rows.length;
+  return { inserted: appends.length, updated: updated };
+}
+
+/** Get a live FY tab, auto-creating it (headers cloned from the newest live tab) if configured. */
+function ensureFyTab_(tabName) {
+  var ss = getSpreadsheet_();
+  var sh = ss.getSheetByName(tabName);
+  if (sh) return sh;
+  if (!CONFIG.sheet.autoCreateFyTab) {
+    throw new Error('Live tab "' + tabName + '" does not exist. Create it (exact name, additively) or set CONFIG.sheet.autoCreateFyTab = true.');
+  }
+  var template = latestLiveTab_(ss);
+  if (!template) throw new Error('Cannot auto-create "' + tabName + '": no existing live tab to copy headers from. Create the first FY tab manually.');
+  sh = ss.insertSheet(tabName);
+  var nCols = template.getLastColumn();
+  sh.getRange(1, 1, 1, nCols).setValues(template.getRange(1, 1, 1, nCols).getValues()).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  logInfo_('Auto-created live tab "' + tabName + '" (headers cloned from "' + template.getName() + '"). Run setupProtections() to protect its tag columns.');
+  return sh;
+}
+
+/** Newest existing live FY tab (max name), used as a header template for auto-create. */
+function latestLiveTab_(ss) {
+  var live = ss.getSheets().filter(function (s) { return s.getName().indexOf(CONFIG.sheet.livePrefix) === 0; });
+  if (!live.length) return null;
+  live.sort(function (a, b) { return a.getName() < b.getName() ? 1 : -1; });
+  return live[0];
+}
+
+/** key → { sheet, cm, rowNum } across all live FY tabs (for tag import / lookups). */
+function buildLiveKeyLocator_() {
+  var ss = getSpreadsheet_();
+  var loc = {};
+  ss.getSheets().forEach(function (sh) {
+    if (sh.getName().indexOf(CONFIG.sheet.livePrefix) !== 0) return;
+    if (sh.getLastRow() < 2) return;
+    var cm = columnMapForSheet_(sh);
+    if (!cm.map.key) return;
+    var keys = sh.getRange(2, cm.map.key, sh.getLastRow() - 1, 1).getValues();
+    for (var i = 0; i < keys.length; i++) {
+      var k = String(keys[i][0]).trim();
+      if (k && !loc[k]) loc[k] = { sheet: sh, cm: cm, rowNum: i + 2 };
+    }
+  });
+  return loc;
 }
 
 // ---- helpers ------------------------------------------------------------
 
-/** Build a full-width row array for a sheet from a canonical row object.
- *  preserveAdmin=true keeps the sheet's current admin-owned cell values. */
-function buildRowArray_(cm, row, current, preserveAdmin) {
+/**
+ * Build a full-width row array for a sheet from a canonical row object.
+ * If `current` is provided (existing row), NON-EMPTY values in specified fields are kept as-is;
+ * a blank specified field is allowed to be filled by the sync. New rows (current=null) get all fields.
+ */
+function buildRowArray_(cm, row, current) {
   var lastCol = cm.header.length;
   var arr = current ? current.slice() : new Array(lastCol).fill('');
+  var preserve = {};
+  preserveFields_().forEach(function (f) { preserve[f] = true; });
+
   CONFIG.columns.forEach(function (c) {
     var idx = cm.map[c.field];
     if (!idx) return;
-    if (c.owner === 'admin' && preserveAdmin && current) return; // don't clobber admin edits
+    if (current && preserve[c.field]) {
+      var cur = current[idx - 1];
+      if (cur !== '' && cur !== null && cur !== undefined) return; // keep the human's value — sacred
+    }
     arr[idx - 1] = formatValue_(c, row[c.field]);
   });
   return arr;
@@ -197,32 +175,6 @@ function readKeyRowIndex_(sheet, keyCol) {
     if (k) map[k] = i + 2;
   }
   return map;
-}
-
-/** Build key → { channel, adminNotes } across all live FY tabs (for carry-forward). */
-function buildLiveTagIndex_() {
-  var ss = getSpreadsheet_();
-  var idx = {};
-  ss.getSheets().forEach(function (sh) {
-    var name = sh.getName();
-    if (name.indexOf(CONFIG.sheet.livePrefix) !== 0) return;   // only live FY tabs
-    if (name === CONFIG.sheet.stagingTab) return;
-    if (sh.getLastRow() < 2) return;
-    var cm = columnMapForSheet_(sh);
-    if (!cm.map.key) return;
-    var lastCol = sh.getLastColumn();
-    var values = sh.getRange(2, 1, sh.getLastRow() - 1, lastCol).getValues();
-    var kC = cm.map.key, chC = cm.map.channel, noC = cm.map.adminNotes;
-    for (var r = 0; r < values.length; r++) {
-      var k = String(values[r][kC - 1]).trim();
-      if (!k) continue;
-      idx[k] = {
-        channel: chC ? values[r][chC - 1] : '',
-        adminNotes: noC ? values[r][noC - 1] : ''
-      };
-    }
-  });
-  return idx;
 }
 
 /** Type/format a value for writing per the column config. */

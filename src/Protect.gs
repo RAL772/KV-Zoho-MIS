@@ -9,15 +9,13 @@
 
 var PROTECT_TAG = 'KV-ZOHO-SYNC admin-only tag column';
 
-/** Protect admin-owned columns on the staging tab and every live FY tab. */
+/** Protect the admin-owned (manual/specified) columns on every live FY tab. */
 function setupProtections() {
   var ss = getSpreadsheet_();
   var adminCols = CONFIG.columns.filter(function (c) { return c.owner === 'admin'; });
-  var targets = [ss.getSheetByName(CONFIG.sheet.stagingTab)].filter(Boolean);
+  var targets = [];
   ss.getSheets().forEach(function (sh) {
-    var name = sh.getName();
-    if (name === CONFIG.sheet.stagingTab) return;              // already added; avoid double-protect
-    if (name.indexOf(CONFIG.sheet.livePrefix) === 0) targets.push(sh);
+    if (sh.getName().indexOf(CONFIG.sheet.livePrefix) === 0) targets.push(sh);
   });
 
   var count = 0;

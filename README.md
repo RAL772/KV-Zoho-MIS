@@ -1,12 +1,13 @@
 # K.V. Toys — Zoho Books → Google Sheet Sales Sync
 
 Automates the **Sales Register** tabs of the MIS dashboard's Google Sheet from **Zoho Books**,
-headless, on a schedule — with a **human-in-the-loop verify/tag step** so an admin approves every
-row (and owns the GT/MT tagging) before it reaches the live dashboard.
+headless, on a schedule. New sales flow **straight to the live tabs each run**; an admin reviews and
+tags (GT/MT etc.) on a **weekly, non-blocking** cadence, and **any value a human sets in the specified
+fields is never overwritten** by a later sync.
 
 - **Extract:** Zoho Books REST API v3, dedicated Self-Client OAuth (India DC), incremental.
 - **Write + schedule:** Google Apps Script (writes natively, self-triggers) — no server, no keys.
-- **Pipeline:** `Zoho → Staging tab → admin verify/tag → Promote → live FY tab → dashboard`.
+- **Pipeline:** `Zoho → live FY tab (upsert, manual fields preserved) → dashboard`; weekly manual review.
 
 > New to this? Start with **[SETUP.md](SETUP.md)** — it's a click-by-click first run.
 
@@ -48,28 +49,33 @@ keeps call volume well under the shared quota.
 ## How the pipeline works
 
 ```
-                    ┌─────────────────────────── daily trigger (runSync) ───────────────────────────┐
-                    ▼                                                                                │
-  Zoho Books ──list invoices/credit-notes modified since checkpoint──► detail-GET each (line items) │
-        │                                                                                           │
-        └──map→ canonical rows (FY-routed, GT/MT seeded, CP/COGS estimated) ──upsert──► [ Staging ] ─┘
-                                                                                             │
-                                    admin reviews, sets Channel mode (GT/MT) + Verified=Yes  │  (protected columns)
-                                                                                             ▼
-                                   Promote ──tag-preserving upsert by invoice_id|line_item_id──► [ Sales Register_FYxx-yy ]
-                                                                                             ▼
-                                                                                    MIS dashboard (live)
+        ┌──────────────────── daily/hourly trigger (runSync) ────────────────────┐
+        ▼                                                                         │
+  Zoho Books ──list invoices/credit-notes modified since checkpoint──► detail-GET │ (line items)
+        │                                                                         │
+        └──map→ rows (FY-routed, GT/MT seeded, CP/COGS estimated) ──UPSERT──► [ Sales Register_FYxx-yy ]
+                                                                                  │        ▲
+                        new rows appear immediately (Verified=No, tag blank)      │        │ manual fields
+                                                                                  ▼        │ preserved
+                                                                         MIS dashboard (live)
+
+  Weekly, non-blocking:  admin fills blank Channel mode + sets Verified=Yes on the live tabs
+                         → future syncs never overwrite those values.
 ```
 
-- **Nothing reaches the dashboard until an admin promotes it.** The dashboard only reads the live
-  `Sales Register_FY*` tabs; staged rows are invisible to it.
-- **Admin owns the tags.** `Channel mode`, `Verified`, `Admin Notes` are **protected ranges** —
-  editable only by the accounts in `CONFIG.admin.editors` (and the owner). The automation writes them
-  through as owner but re-syncs never clobber an admin's edits.
+- **No per-run gate.** Each sync upserts new/changed rows **directly** into the live FY tabs, so the
+  dashboard stays current automatically. New rows arrive with `Verified = No` and a seeded (or blank)
+  `Channel mode` for the weekly review to finish.
+- **Specified fields are sacred.** On a row that already exists, the sync **never overwrites a
+  non-empty value** in `CONFIG.preserveOnUpdate` (default: `Channel mode`, `Verified`, `Admin Notes`).
+  It may fill a still-blank one from the auto-resolver, but a human's value always wins. Those columns
+  are also **protected ranges** — only `CONFIG.admin.editors` (and the owner) can edit them in-sheet.
+- **Weekly review is a cleanup, not a gate.** `reviewSummary()` (menu: *Weekly review summary*) lists
+  how many rows per FY tab still need a GT/MT tag or aren't `Verified=Yes`.
 - **Idempotent.** Every row is keyed `invoice_id|line_item_id` (credit notes `creditnote_id|line_id`),
   so re-runs upsert instead of duplicating. Returns are written as **negative** rows for netting.
 - **Forward-only by default.** Historical FY tabs stay hand-maintained; the sync owns invoices dated
-  on/after `CONFIG.zoho.backfillStartDate`.
+  on/after `CONFIG.zoho.backfillStartDate`. New FY tabs are auto-created (headers cloned) at roll-over.
 
 ---
 
@@ -99,10 +105,11 @@ and the `backfillStartDate`.
 - `src/Config.gs` — all behaviour config (secrets live in Script Properties, not here).
 - `src/ZohoClient.gs` — OAuth refresh, paginated fetch, backoff, detail GET, `listCustomFields()`.
 - `src/Mapping.gs` — invoice/credit-note → rows; GT/MT, state, CP resolvers.
-- `src/SheetIO.gs` — header-matched, tag-preserving upsert; staging + promote.
+- `src/SheetIO.gs` — header-matched, **manual-field-preserving** upsert directly into live FY tabs;
+  auto-creates a new FY tab (cloned headers) at roll-over.
 - `src/Sync.gs` — orchestrator (`runSync`), checkpoint, `verifyZohoConnection()`.
-- `src/Promote.gs` — thin promote entry (delegates to SheetIO).
-- `src/Protect.gs` — admin-only protected ranges (`setupProtections()`).
+- `src/Review.gs` — `reviewSummary()`: weekly counts of untagged / unverified rows.
+- `src/Protect.gs` — admin-only protected ranges on the specified fields (`setupProtections()`).
 - `src/Menu.gs` — custom menu, trigger install, Excel export/import.
 - `src/appsscript.json` — manifest (scopes).
 

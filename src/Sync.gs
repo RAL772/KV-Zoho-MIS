@@ -2,8 +2,9 @@
  * Sync.gs — the orchestrator run by the time-driven trigger (and the "Sync now" menu item).
  *
  * Flow: read checkpoint → list invoices/credit-notes modified since it → detail-GET each for
- * line items → map to rows → upsert into STAGING (never straight to live) → advance checkpoint.
- * Rows sit in staging until an admin verifies & promotes them (Promote.gs).
+ * line items → map to rows → upsert DIRECTLY into the live FY tabs → advance checkpoint.
+ * New rows appear immediately (Verified=No); manual "specified fields" on existing rows are never
+ * overwritten (see SheetIO / CONFIG.preserveOnUpdate). Admins review weekly (Review.gs).
  */
 
 /** Main entry point (trigger target). */
@@ -44,8 +45,8 @@ function runSync() {
       });
     }
 
-    var res = writeRowsToStaging_(allRows);
-    logInfo_('Staging upsert: ' + res.inserted + ' new, ' + res.updated + ' updated, ' + allRows.length + ' line rows total.');
+    var res = writeRowsToLive_(allRows);
+    logInfo_('Live upsert: ' + res.inserted + ' new, ' + res.updated + ' updated (' + allRows.length + ' line rows across ' + Object.keys(res.tabs).length + ' FY tab(s)). Manual tags on existing rows were preserved.');
 
     // advance checkpoint to the date of the newest modification we saw (idempotent upsert covers overlaps)
     setCheckpoint_(isoDateOnly_(maxModified));

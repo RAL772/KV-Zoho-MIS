@@ -60,9 +60,10 @@ Apps Script editor → **Project Settings → Script Properties → Add**:
 - `zoho.backfillStartDate` — first invoice date the sync should own (e.g. start of current FY).
 - `sheet.livePrefix` + tab names — must match your **exact** tab names (`Sales Register_FY25-26`, …).
 - `columns[].header` — must match your live Sales Register's **exact headers** (order doesn't matter;
-  matched by name/alias). Admin columns `Channel mode` / `Verified` / `Admin Notes` will be created on
-  staging and should exist on live tabs (add them if missing — a `_Key` column is required on live
-  tabs so promotion can upsert without duplicates).
+  matched by name/alias). The specified fields `Channel mode` / `Verified` / `Admin Notes` and a
+  **`_Key`** column must exist on each live tab (add them if missing — `_Key` lets the sync upsert
+  without duplicating rows).
+- `preserveOnUpdate` — the "specified fields" the sync must never overwrite once you've set them.
 - `admin.editors` — Google accounts allowed to edit tag columns.
 - `channel.customFieldApiName` — run **`listCustomFields()`** (see step 5) to discover the real
   api_name, then paste it here. No channel field? Use the `Customer Channel Map` tab fallback.
@@ -74,12 +75,14 @@ Apps Script editor → **Project Settings → Script Properties → Add**:
 Run these from the editor (**Run** ▸ pick the function); authorize scopes on first run.
 1. `verifyZohoConnection` → Executions log should list your org(s). Confirms OAuth + org id.
 2. `listCustomFields` → copy the channel field's `api_name` into `Config.gs`.
-3. `runSync` → check the **Staging** tab fills with rows; `Verified` = `No`, `Channel mode` seeded.
-4. In Staging, set a few `Channel mode` (GT/MT) and `Verified` = `Yes`.
-5. `setupProtections` → confirm a non-admin account can no longer edit the tag columns.
-6. `promoteVerified` → verified rows move into the correct `Sales Register_FYxx-yy` tab; re-run
-   `runSync` and confirm your tags were **not** overwritten (idempotency check).
-7. Load the dashboard (`index.html`) against the copy → tabs parse, gid discovery works, KPIs render,
+3. `runSync` → new rows land **directly** in the correct `Sales Register_FYxx-yy` tab; `Verified` =
+   `No`, `Channel mode` seeded (or blank).
+4. On the live tab, hand-set a couple of `Channel mode` (GT/MT) values and `Verified` = `Yes`.
+5. **Re-run `runSync`** → confirm those hand-set values were **NOT overwritten** (the core guarantee),
+   while data columns still refreshed. This is the key test.
+6. `setupProtections` → confirm a non-admin account can no longer edit the specified-field columns.
+7. `reviewSummary` → logs how many rows still need a tag / aren't verified.
+8. Load the dashboard (`index.html`) against the copy → tabs parse, gid discovery works, KPIs render,
    no tab was renamed/recreated.
 
 ---
@@ -95,12 +98,16 @@ run stays under the 6-minute cap.
 
 ---
 
-## Daily operation (admin)
-1. Sync runs automatically (or **KV Sync → Sync now**).
-2. Open **Staging**, review new rows, set `Channel mode` where blank, mark `Verified = Yes`.
-   *(Optional offline: **Export Staging to Excel**, edit, then **Import tags from a tab**.)*
-3. **KV Sync → Promote verified rows → Live**. Done — the dashboard updates.
+## Operation
+- **Every run (auto):** the sync upserts new/changed sales straight into the live FY tabs; the
+  dashboard updates on its own. Your manual tags are preserved.
+- **Weekly (admin, ~5 min):** **KV Sync → Weekly review summary** to see what needs attention, then on
+  the live tabs fill blank `Channel mode` and set `Verified = Yes`. *(Optional offline: **Export a tab
+  to Excel**, edit the specified fields, then **Import tags from a tab**.)* No promote step — edits are
+  live immediately and stick.
 
 ## Rolling into a new FY
-Create the next tab additively with the **exact** name (`Sales Register_FY27-28`), give it the same
-headers incl. `_Key`, then run `setupProtections` again. Never rename/recreate existing tabs.
+With `autoCreateFyTab: true` the sync creates the next tab (e.g. `Sales Register_FY27-28`) by cloning
+the newest live tab's headers. Run `setupProtections` afterwards to protect the new tab's specified
+fields. (Prefer to pre-create it by hand? Just add the tab with the exact name + headers incl. `_Key`.)
+Never rename/recreate existing tabs.
