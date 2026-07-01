@@ -16,23 +16,21 @@ function buildMappingContext_() {
 
 /**
  * Expand one Zoho invoice into an array of row objects (one per line item).
- * `voided` invoices (status === 'void') are returned with qty/amounts zeroed so downstream
- * netting is correct while keeping the row visible/auditable.
+ * Void/draft invoices never reach here — they are excluded (and their rows deleted) in runSync.
  */
 function invoiceToRows_(inv, ctx) {
   var date = parseIsoDate_(inv.date);
   var channel = resolveChannel_(inv, ctx);
   var state = resolveState_(inv);
-  var isVoid = String(inv.status).toLowerCase() === 'void';
   var lines = inv.line_items || [];
   var rows = [];
 
   for (var i = 0; i < lines.length; i++) {
     var li = lines[i];
     var code = li.sku || String(li.item_id || '');
-    var qty = isVoid ? 0 : (Number(li.quantity) || 0);
+    var qty = Number(li.quantity) || 0;
     var rate = Number(li.rate) || 0;
-    var revenue = isVoid ? 0 : (Number(li.item_total) || 0);
+    var revenue = Number(li.item_total) || 0;
     var cp = lookupCp_(code, channel, ctx);
     var cogs = round2_(qty * cp);
     var profit = round2_(revenue - cogs);
@@ -59,7 +57,7 @@ function invoiceToRows_(inv, ctx) {
       key: lineKey_(inv.invoice_id, li.line_item_id),
       zohoStatus: inv.status || '',
       lastModified: inv.last_modified_time || '',
-      source: isVoid ? 'invoice(void)' : 'invoice',
+      source: 'invoice',
       _date: date                    // internal: used for FY routing
     });
   }

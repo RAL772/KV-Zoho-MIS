@@ -20,6 +20,9 @@ function runSync() {
     var maxModified = since;
 
     var floor = CONFIG.zoho.backfillStartDate; // forward-only: ignore invoices dated before this
+    var excluded = {};
+    (CONFIG.zoho.excludeStatuses || []).forEach(function (s) { excluded[String(s).toLowerCase()] = true; });
+    var removeIds = {};   // doc ids whose rows must be deleted (void/draft), regardless of manual edits
 
     // ---- invoices ----
     var invHeaders = zohoListModified_('invoices', since).filter(function (h) {
@@ -27,9 +30,14 @@ function runSync() {
     });
     logInfo_('Invoices changed (in scope): ' + invHeaders.length);
     invHeaders.forEach(function (h) {
+      maxModified = maxIso_(maxModified, h.last_modified_time);
+      if (excluded[String(h.status).toLowerCase()]) {   // status is in the LIST response → no detail GET needed
+        removeIds[String(h.invoice_id)] = true;
+        return;
+      }
       var inv = zohoGetInvoice_(h.invoice_id);   // list omits line_items → detail GET required
+      if (excluded[String(inv.status).toLowerCase()]) { removeIds[String(inv.invoice_id)] = true; return; }
       allRows = allRows.concat(invoiceToRows_(inv, ctx));
-      maxModified = maxIso_(maxModified, inv.last_modified_time);
     });
 
     // ---- credit notes (returns) ----
@@ -39,14 +47,20 @@ function runSync() {
       });
       logInfo_('Credit notes changed (in scope): ' + cnHeaders.length);
       cnHeaders.forEach(function (h) {
+        maxModified = maxIso_(maxModified, h.last_modified_time);
+        if (excluded[String(h.status).toLowerCase()]) { removeIds[String(h.creditnote_id)] = true; return; }
         var cn = zohoGetCreditNote_(h.creditnote_id);
+        if (excluded[String(cn.status).toLowerCase()]) { removeIds[String(cn.creditnote_id)] = true; return; }
         allRows = allRows.concat(creditNoteToRows_(cn, ctx));
-        maxModified = maxIso_(maxModified, cn.last_modified_time);
       });
     }
 
+    // ---- remove void/draft (and any that transitioned) BEFORE upserting; overrides manual edits ----
+    var removed = deleteRowsByDocIds_(removeIds);
+    if (removed) logInfo_('Removed ' + removed + ' row(s) for ' + Object.keys(removeIds).length + ' void/draft document(s) — manual edits ignored by design.');
+
     var res = writeRowsToLive_(allRows);
-    logInfo_('Live upsert: ' + res.inserted + ' new, ' + res.updated + ' updated (' + allRows.length + ' line rows across ' + Object.keys(res.tabs).length + ' FY tab(s)). Manual tags on existing rows were preserved.');
+    logInfo_('Live upsert: ' + res.inserted + ' new, ' + res.updated + ' updated (' + allRows.length + ' line rows across ' + Object.keys(res.tabs).length + ' FY tab(s)). Manual tags on existing sales rows were preserved.');
 
     // advance checkpoint to the date of the newest modification we saw (idempotent upsert covers overlaps)
     setCheckpoint_(isoDateOnly_(maxModified));

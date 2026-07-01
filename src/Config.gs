@@ -20,7 +20,11 @@ var CONFIG = {
     perPage: 200,             // Zoho max page size
     maxRetries: 5,            // on HTTP 429 / transient errors (no Retry-After header from Zoho)
     // Modules to pull. Invoices are the core sales feed. Credit notes = returns (negative rows).
-    fetchCreditNotes: true
+    fetchCreditNotes: true,
+    // Statuses NOT to be considered as sales. Documents in these statuses are never added, and any
+    // rows already in the sheet for such a document are DELETED on the next run — overriding manual
+    // edits (a void/draft doc must not remain in the register even if it was tagged). Lower-case.
+    excludeStatuses: ['void', 'draft']
   },
 
   // ---- Google Sheet ------------------------------------------------------

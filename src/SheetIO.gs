@@ -60,6 +60,35 @@ function writeRowsToLive_(rows) {
   return summary;
 }
 
+/**
+ * Delete every live-tab row belonging to any document id in `idSet` (key prefix `id|…`).
+ * Used for void/draft documents — removal is intentional and OVERRIDES manual edits.
+ * Returns the number of rows deleted.
+ */
+function deleteRowsByDocIds_(idSet) {
+  if (!idSet || !Object.keys(idSet).length) return 0;
+  var ss = getSpreadsheet_();
+  var removed = 0;
+  ss.getSheets().forEach(function (sh) {
+    if (sh.getName().indexOf(CONFIG.sheet.livePrefix) !== 0) return;
+    if (sh.getLastRow() < 2) return;
+    var cm = columnMapForSheet_(sh);
+    if (!cm.map.key) return;
+    var keys = sh.getRange(2, cm.map.key, sh.getLastRow() - 1, 1).getValues();
+    var toDelete = [];
+    for (var i = 0; i < keys.length; i++) {
+      var k = String(keys[i][0]).trim();
+      if (!k) continue;
+      var docId = k.split('|')[0];           // key = invoice_id|line_item_id
+      if (idSet[docId]) toDelete.push(i + 2); // sheet row number
+    }
+    toDelete.sort(function (a, b) { return b - a; }); // bottom-up so indices stay valid
+    toDelete.forEach(function (rn) { sh.deleteRow(rn); });
+    removed += toDelete.length;
+  });
+  return removed;
+}
+
 /** Upsert rows into ONE live FY tab. Preserves non-empty specified fields on existing rows. */
 function upsertLive_(tabName, rows) {
   var sh = ensureFyTab_(tabName);

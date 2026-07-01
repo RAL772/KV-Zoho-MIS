@@ -72,6 +72,11 @@ keeps call volume well under the shared quota.
   are also **protected ranges** — only `CONFIG.admin.editors` (and the owner) can edit them in-sheet.
 - **Weekly review is a cleanup, not a gate.** `reviewSummary()` (menu: *Weekly review summary*) lists
   how many rows per FY tab still need a GT/MT tag or aren't `Verified=Yes`.
+- **Void / draft are never sales.** Documents whose status is in `CONFIG.zoho.excludeStatuses`
+  (`void`, `draft`) are never added, and if a previously-synced invoice **later turns void/draft**, all
+  its rows are **deleted** on the next run — this override is intentional and **ignores manual edits**
+  (a void/draft doc must not linger even if it was tagged). Detected from the list response, so no
+  detail GET is spent on them.
 - **Idempotent.** Every row is keyed `invoice_id|line_item_id` (credit notes `creditnote_id|line_id`),
   so re-runs upsert instead of duplicating. Returns are written as **negative** rows for netting.
 - **Forward-only by default.** Historical FY tabs stay hand-maintained; the sync owns invoices dated
