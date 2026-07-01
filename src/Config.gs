@@ -23,8 +23,10 @@ var CONFIG = {
     fetchCreditNotes: true,
     // Statuses NOT to be considered as sales. Documents in these statuses are never added, and any
     // rows already in the sheet for such a document are DELETED on the next run — overriding manual
-    // edits (a void/draft doc must not remain in the register even if it was tagged). Lower-case.
-    excludeStatuses: ['void', 'draft']
+    // edits (a Void/Draft doc must not remain in the register even if it was tagged).
+    // Matching is CASE-INSENSITIVE, so 'Void'/'Draft' here also matches the API's lower-case
+    // status field ('void'/'draft'). List whatever you see in Zoho.
+    excludeStatuses: ['Void', 'Draft']
   },
 
   // ---- Google Sheet ------------------------------------------------------

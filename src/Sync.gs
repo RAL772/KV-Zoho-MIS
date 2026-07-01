@@ -21,7 +21,7 @@ function runSync() {
 
     var floor = CONFIG.zoho.backfillStartDate; // forward-only: ignore invoices dated before this
     var excluded = {};
-    (CONFIG.zoho.excludeStatuses || []).forEach(function (s) { excluded[String(s).toLowerCase()] = true; });
+    (CONFIG.zoho.excludeStatuses || []).forEach(function (s) { excluded[String(s).trim().toLowerCase()] = true; });
     var removeIds = {};   // doc ids whose rows must be deleted (void/draft), regardless of manual edits
 
     // ---- invoices ----
@@ -31,12 +31,12 @@ function runSync() {
     logInfo_('Invoices changed (in scope): ' + invHeaders.length);
     invHeaders.forEach(function (h) {
       maxModified = maxIso_(maxModified, h.last_modified_time);
-      if (excluded[String(h.status).toLowerCase()]) {   // status is in the LIST response → no detail GET needed
+      if (excluded[String(h.status).trim().toLowerCase()]) {   // status is in the LIST response → no detail GET needed
         removeIds[String(h.invoice_id)] = true;
         return;
       }
       var inv = zohoGetInvoice_(h.invoice_id);   // list omits line_items → detail GET required
-      if (excluded[String(inv.status).toLowerCase()]) { removeIds[String(inv.invoice_id)] = true; return; }
+      if (excluded[String(inv.status).trim().toLowerCase()]) { removeIds[String(inv.invoice_id)] = true; return; }
       allRows = allRows.concat(invoiceToRows_(inv, ctx));
     });
 
@@ -48,9 +48,9 @@ function runSync() {
       logInfo_('Credit notes changed (in scope): ' + cnHeaders.length);
       cnHeaders.forEach(function (h) {
         maxModified = maxIso_(maxModified, h.last_modified_time);
-        if (excluded[String(h.status).toLowerCase()]) { removeIds[String(h.creditnote_id)] = true; return; }
+        if (excluded[String(h.status).trim().toLowerCase()]) { removeIds[String(h.creditnote_id)] = true; return; }
         var cn = zohoGetCreditNote_(h.creditnote_id);
-        if (excluded[String(cn.status).toLowerCase()]) { removeIds[String(cn.creditnote_id)] = true; return; }
+        if (excluded[String(cn.status).trim().toLowerCase()]) { removeIds[String(cn.creditnote_id)] = true; return; }
         allRows = allRows.concat(creditNoteToRows_(cn, ctx));
       });
     }
