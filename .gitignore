@@ -1,0 +1,21 @@
+# clasp — never commit the real project link or local auth
+.clasp.json
+.clasprc.json
+.clasp-*.json
+
+# secrets — Zoho / Google credentials must NEVER be committed.
+# (They live in Apps Script Script Properties, not in the repo.)
+*.env
+.env*
+*client_secret*
+*credentials*.json
+service-account*.json
+*refresh_token*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+node_modules/
